@@ -1,0 +1,198 @@
+#! /usr/bin/python3
+
+import socket
+import logging
+import sys
+import os
+import time
+import select
+import random
+import traceback
+import threading
+from sys import flags, stdin, version
+
+PORT = 1883
+TYPE_CONNECT = 0x10
+TYPE_CONNACK = 0x20
+TYPE_DISCONNECT = 0xe0
+TYPE_PUBLISH = 0x30
+TYPE_SUBSCRIBE = 0x80
+TYPE_SUBACK = 0x90
+PROTOCOLE_NAME = "MQTT"
+PROTOCOLE_VERSION = 0x4
+QOS_DEFAULT = 0
+
+def create_mqtt_publish_msg(topic, value, retain=False):
+    #control header
+    if retain:
+        flag=bytes('1','ascii')
+    else :
+        flag=bytes('0','ascii')
+
+    #longueur totale
+    lenmsg=(len(topic)+2+len(value)).to_bytes(1,byteorder='big')
+
+    #longueur du topic
+    lentopic=len(topic).to_bytes(2,byteorder='big')
+
+    #return la reponse encodé
+    return flag+lenmsg+lentopic+bytes(topic+value,'ascii')
+
+#deux test
+create_mqtt_publish_msg('coucou','24',False)
+create_mqtt_publish_msg('test','20C',True)
+
+def create_mqtt_connect_msg(client_id):
+    msg_mqtt_flags = TYPE_CONNECT.to_bytes(1,byteorder='big')
+    msg_mqtt_protocoleName= PROTOCOLE_NAME.encode("ascii")
+    msg_mqtt_protocoleLenght=len( msg_mqtt_protocoleName).to_bytes(2,byteorder='big')
+    msg_mqtt_level= PROTOCOLE_VERSION.to_bytes(1,byteorder='big')
+    msg_mqtt_id=client_id.encode("ascii")
+    msg_mqtt_id_lenght=len(msg_mqtt_id).to_bytes(2,byteorder='big')
+    msg_mqtt_connect=(2).to_bytes(1,byteorder='big')
+    msg_mqtt_keepalive=(60).to_bytes(1,byteorder='big')
+    msg_mqtt= msg_mqtt_protocoleLenght + msg_mqtt_protocoleName + msg_mqtt_level + msg_mqtt_connect + msg_mqtt_keepalive + msg_mqtt_id_lenght + msg_mqtt_id
+    msg_mqtt_lenght=len(msg_mqtt).to_bytes(1,byteorder='big')
+    
+    return msg_mqtt_flags + msg_mqtt_lenght + msg_mqtt
+    
+def create_mqtt_connack_msg():
+    msg_mqtt_flags = TYPE_CONNACK.to_bytes(1,byteorder='big')
+    msg_flag = (0x00).to_bytes(1, byteorder = 'big')
+    msg_mqtt_code=(0).to_bytes(1,byteorder='big')
+    msg=msg_flag + msg_mqtt_flags +msg_mqtt_code
+    msg_mqtt_lenght=len(msg).to_bytes(1,byteorder='big')
+  
+    return msg_mqtt_flags + msg_mqtt_lenght + msg_flag + msg_mqtt_code
+
+def create_mqtt_disconnect_msg():
+    msg_mqtt_flags=TYPE_DISCONNECT.to_bytes(1,byteorder='big')
+    msg_mqtt_lenght=(0).to_bytes(1,byteorder='big')
+    return msg_mqtt_flags + msg_mqtt_lenght
+    
+def create_mqtt_subscribe_msg(topic, packet_id):
+    msg_mqtt_flags=TYPE_SUBSCRIBE.to_bytes(1,byteorder='big')
+    msg_mqtt_id=packet_id.encode("ascii")
+    msg_topic = topic.encode("ascii")
+    msg_topic_length = len(msg_topic).to_bytes(2, byteorder='big')
+    msg=  msg_mqtt_id + msg_topic_length + msg_topic
+    msg_mqtt_lenght=len(msg).to_bytes(1,byteorder='big')
+    return msg_mqtt_flags + msg_mqtt_lenght + msg_mqtt_id + msg_topic_length + msg_topic
+    
+def create_mqtt_suback_msg(topic, packet_id):
+    msg_mqtt_flags=TYPE_SUBACK.to_bytes(1,byteorder='big')
+    msg_mqtt_id=packet_id.encode("ascii")
+    msg_mqtt_requested_QoS= (0).to_bytes(1,byteorder='big')
+    msg=msg_mqtt_id + msg_mqtt_requested_QoS
+    msg_mqtt_lenght=len(msg).to_bytes(1,byteorder='big')
+    return msg_mqtt_flags + msg_mqtt_lenght + msg
+
+### main routines ###
+
+def run_publisher(addr, topic, pub_id, retain=False):
+
+    s=socket.socket(socket.AF_INET6,socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(('', 0))
+    s.connect(addr)
+    connectPacket = create_mqtt_connect_msg(pub_id)
+    s.sendall(connectPacket)
+    reponsePacket = s.recv(128)
+    while True:
+        for line in stdin:
+            valeur=line[:-1]
+            if line == '\n' or line == '':
+                s.sendall(create_mqtt_disconnect_msg())
+                s.close()
+                break
+            else:
+                line = line[:-1]
+                packet = create_mqtt_publish_msg(topic, line, retain)
+                s.sendall(packet)
+                time.sleep(0.2)
+        s.sendall(create_mqtt_disconnect_msg())
+        s.close()
+        exit()           
+                
+
+def run_subscriber(addr, topic, sub_id):
+    
+    connackPacket = create_mqtt_connack_msg()
+    subackPacket = create_mqtt_suback_msg(topic,sub_id)
+    packetId = random.randint(1, 65534)
+    
+    s=socket.socket(socket.AF_INET6,socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    s.connect(addr)
+    
+    while True:
+        connectPacket = create_mqtt_connect_msg(sub_id)
+        s.sendall(connectPacket)
+        reponsePacket = s.recv(128)
+        if reponsePacket == subackPacket:
+            break
+        time.sleep(0.2)
+    
+    while True:
+        connectPacket = create_mqtt_subscribe_msg(packetId,topic)
+        s.sendall(connectPacket)
+        reponsePacket = s.recv(128)
+        if (reponsePacket).decode == TYPE_CONNACK:
+            break
+        time.sleep(0.2)
+    
+    while True:
+        data = s.recv(128)
+        length = data[1] - 2 - data[3]
+        print("{}".format(topic), data[-length:].decode("ascii"))
+        if data == "\n":
+            s.sendall(bytearray([0xe0, 0x0]))
+            break
+        
+                
+
+def run_server(addr):
+
+    s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM, 0)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((addr))
+    s.listen(1)
+    l=[]
+    t=[]
+    while True:
+        r,_, _=select.select(l + [s], [], [])
+        for s2 in r:
+            if s2==s:
+                s3, a=s.accept()
+                print("new client:", a)
+                l=l+[s3]
+            else:
+                msg=s2.recv(128)
+                start=msg[0:1]
+                if(start==TYPE_CONNECT) :
+                    rep=create_mqtt_connack_msg()
+                    s.sendall(rep)
+    
+                elif (start==TYPE_SUBSCRIBE):
+                    topic=msg[2:4]
+                    lenm=int.from_bytes(topic,"big")
+                    mstr=msg[4:4+len]
+                    sub=mstr.decode("utf-8")
+                    t=t+[(topic,socket)]
+                    suback=create_mqtt_suback_msg()
+                    s.sendall(suback)
+                elif (start==TYPE_PUBLISH):
+                    topic=msg[2:4]
+                    lenm=int.from_bytes(topic,"big")
+                    mstr=msg[4:4+lenm]
+                    sub=mstr.decode("utf-8") 
+                    value=msg[:-1]
+                    vals=value.decode("utf-8")
+                    for i in l:
+                        client = create_mqtt_publish_msg(sub,vals, retain = False)
+                        i.sendall(client)
+                elif (start == TYPE_DISCONNECT):
+                    s.close()
+                    l.remove(s)
+                    continue
